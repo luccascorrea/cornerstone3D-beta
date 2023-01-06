@@ -15,6 +15,11 @@ import {
 } from '../../../../utils/demo/helpers';
 import * as cornerstoneTools from '@cornerstonejs/tools';
 import { VolumeActor } from 'core/src/types';
+import vtkImageCroppingWidget from '@kitware/vtk.js/Widgets/Widgets3D/ImageCroppingWidget';
+import vtkWidgetManager from '@kitware/vtk.js/Widgets/Core/WidgetManager';
+import { vec3, quat, mat4 } from 'gl-matrix';
+import vtkPlane from '@kitware/vtk.js/Common/DataModel/Plane';
+import { VolumeViewport3D } from "core/src/RenderingEngine";
 
 // This is for debugging purposes
 console.warn(
@@ -159,17 +164,76 @@ async function run() {
   // Set the volume to load
   volume.load();
 
+  // Cropping planes
+  function getCroppingPlanes(imageData, ijkPlanes) {
+    const rotation = quat.create();
+    mat4.getRotation(rotation, imageData.getIndexToWorld());
+
+    const rotateVec = (vec): [number,number,number] => {
+      const out: [number, number, number] = [0, 0, 0];
+      // const out = vec3.create();
+      vec3.transformQuat(out as any, vec, rotation);
+      return out;
+    };
+
+    const [iMin, iMax, jMin, jMax, kMin, kMax] = ijkPlanes;
+    const origin = imageData.indexToWorld([iMin, jMin, kMin]);
+    // opposite corner from origin
+    const corner = imageData.indexToWorld([iMax, jMax, kMax]);
+    return [
+      // X min/max
+      vtkPlane.newInstance({ normal: rotateVec([1, 0, 0]), origin }),
+      vtkPlane.newInstance({ normal: rotateVec([-1, 0, 0]), origin: corner }),
+      // Y min/max
+      vtkPlane.newInstance({ normal: rotateVec([0, 1, 0]), origin }),
+      vtkPlane.newInstance({ normal: rotateVec([0, -1, 0]), origin: corner }),
+      // X min/max
+      vtkPlane.newInstance({ normal: rotateVec([0, 0, 1]), origin }),
+      vtkPlane.newInstance({ normal: rotateVec([0, 0, -1]), origin: corner }),
+    ];
+  }
+
+  // Setup widget
+  function setupWidget(viewport: VolumeViewport3D) {
+    const volumeActor = viewport.getDefaultActor().actor as VolumeActor;
+    const { imageData: image } = viewport.getImageData();
+    const mapper = volumeActor.getMapper();
+
+    const widgetManager = vtkWidgetManager.newInstance();
+    const widget = vtkImageCroppingWidget.newInstance();
+    const renderer = viewport.getRenderer();
+    const renderWindow = renderer.getRenderWindow();
+    const interactor = renderWindow.getInteractor();
+    // interactor.bindEvents(element1); // This line causes an infinite loop for some reason
+
+    widgetManager.setRenderer(renderer);
+    widgetManager.addWidget(widget);
+
+    widgetManager.enablePicking();
+
+    // Update cropping widget
+    widget.copyImageDataDescription(image);
+    const cropState = widget.getWidgetState().getCroppingPlanes();
+    cropState.onModified(() => {
+      const planes = getCroppingPlanes(image, cropState.getPlanes());
+      mapper.removeAllClippingPlanes();
+      planes.forEach((plane) => mapper.addClippingPlane(plane));
+      mapper.modified();
+    });
+  }
+
+  // Initialize viewports
   setVolumesForViewports(renderingEngine, [{ volumeId }], [viewportId]).then(
     () => {
-      const volumeActor = renderingEngine
-        .getViewport(viewportId)
-        .getDefaultActor().actor as VolumeActor;
+      const viewport = renderingEngine.getViewport(viewportId);
+      const volumeActor = viewport.getDefaultActor().actor as VolumeActor;
 
       utilities.applyPreset(
         volumeActor,
         CONSTANTS.VIEWPORT_PRESETS.find((preset) => preset.name === 'CT-Bone')
       );
 
+      setupWidget(viewport);
       const renderer = viewport.getRenderer();
       renderer.getActiveCamera().elevation(-70);
       viewport.setCamera({ parallelScale: 600 });
